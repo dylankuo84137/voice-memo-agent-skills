@@ -1,0 +1,142 @@
+# =========================================================================
+# Voice Transcription Service - Configuration Template
+# =========================================================================
+
+# -------------------------------------------------------------------------
+# API Configuration
+# -------------------------------------------------------------------------
+api:
+  # Base URL for the API endpoint
+  # Use "https://openrouter.ai/api/v1" for OpenRouter
+  base_url: "https://openrouter.ai/api/v1"
+
+  # Transcription mode:
+  #   "audio_api"        — OpenAI native /v1/audio/transcriptions
+  #   "chat_completions" — Chat completions with base64 audio (OpenRouter)
+  transcription_mode: "chat_completions"
+# This configuration file controls the behavior of the voice transcription
+# service. All settings can be overridden via environment variables or
+# command-line arguments.
+#
+# Configuration Priority (high to low):
+#   1. Command-line arguments (--api-key, --output-dir, etc.)
+#   2. Environment variables (OPENAI_API_KEY, TRANSCRIBE_SKILL_*)
+#   3. This YAML configuration file
+#   4. Code defaults
+# =========================================================================
+
+# -------------------------------------------------------------------------
+# Model Configuration
+# -------------------------------------------------------------------------
+# Controls the OpenAI API model and transcription parameters
+model:
+  # Model name for transcription
+  # OpenAI: "gpt-4o-transcribe", "gpt-4o-mini-transcribe"
+  # OpenRouter: "google/gemini-2.5-flash", "openai/gpt-4o-transcribe"
+  name: "google/gemini-2.5-flash"
+
+  # Language code for the audio content (ISO 639-1 format)
+  # Common values: "zh" (Chinese), "en" (English), "ja" (Japanese), etc.
+  # This helps improve transcription accuracy
+  language: "zh"
+
+  # Temperature for model randomness (0.0 to 1.0)
+  # Lower values (0.0-0.3): More deterministic, consistent output
+  # Higher values (0.7-1.0): More creative, varied output
+  # Recommended: 0.0-0.2 for transcription tasks
+  temperature: 0.2
+
+  # Response format from the API
+  # Options: "text", "json", "verbose_json", "srt", "vtt"
+  # "text" returns plain transcript text (recommended for most use cases)
+  response_format: "text"
+
+  # Prompt to guide the transcription model
+  # Used to improve punctuation, formatting, and context understanding
+  # Keep it concise and relevant to your audio content
+  prompt: "add appropriate punctuation and formatting."
+
+# -------------------------------------------------------------------------
+# File Handling Configuration
+# -------------------------------------------------------------------------
+# Controls which files can be processed and size limits
+files:
+  # List of supported audio file formats (case-insensitive)
+  # These are the formats that the service will accept for transcription
+  supported_formats:
+    - ".m4a"  
+    - ".mp3"   
+    - ".wav"   
+    - ".mp4"   
+
+  # Maximum file size allowed for transcription (in megabytes)
+  # OpenAI API limit is 25MB per file
+  # Files exceeding this limit will be rejected before API call
+  max_file_size_mb: 25
+
+# -------------------------------------------------------------------------
+# Sources (Input Discovery)
+# -------------------------------------------------------------------------
+# Default locations for discovering voice memos (not auto-scanned by default).
+# Can be used by external wrappers or future `ingest` commands.
+sources:
+  # Default directory where voice memos are stored
+  # Use an absolute path or shell-tilde-expansion path.
+  voice_memo_directory: "~/gdrive/Inbox/voice-memo-recordings"
+  # Default synchronization date range (days) for DB selections
+  # Used when --db-days is not provided on CLI
+  default_sync_days: 30
+
+# -------------------------------------------------------------------------
+# Output Configuration
+# -------------------------------------------------------------------------
+# Controls where and how transcripts are saved
+output:
+  # Default directory for saving transcripts (relative or absolute path)
+  # Can be overridden with --output-dir command-line argument
+  # Relative paths are resolved from the script execution directory
+  directory: "~/Documents/voice-memo-agent-skills/raw-transcript"
+
+  # File extension for transcript output files
+  # Output filename format: voice-memo_YYYYMMDD_HHMMSS<suffix>
+  # Example: voice-memo_20250321_153045.md
+  suffix: ".md"
+
+  # Character encoding for output files
+  # "utf-8" is recommended for international characters (Chinese, Japanese, etc.)
+  encoding: "utf-8"
+
+# -------------------------------------------------------------------------
+# Database Configuration
+# -------------------------------------------------------------------------
+# SQLite database for tracking file metadata and processing status
+database:
+  # Path to the SQLite database file (relative or absolute)
+  # The database stores: file metadata, processing status, output paths, errors
+  # Auto-created on first run with proper schema
+  path: "./audio_metadata.db"
+
+  # Connection timeout in seconds
+  # Prevents deadlocks when multiple processes access the database
+  # Increase if you experience frequent timeout errors
+  timeout: 10.0
+
+# -------------------------------------------------------------------------
+# Safety Safeguards
+# -------------------------------------------------------------------------
+# Prevents accidental large batch operations that could incur high API costs
+safeguards:
+  # Default maximum number of files to process in a single run
+  # Can be overridden with --max-files command-line argument
+  # Helps prevent accidentally processing hundreds of files
+  default_max_files: 10
+
+  # Number of files that triggers a confirmation prompt
+  # If processing more than this number, --yes flag is required
+  # Set to 0 to disable confirmation prompts (not recommended)
+  confirmation_threshold: 3
+
+  # Skip files already marked as "completed" in database by default
+  # Set to false to always reprocess all selected files
+  # Can be overridden with --force command-line flag
+  skip_completed_by_default: true

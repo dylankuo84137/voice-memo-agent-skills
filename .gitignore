@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.m4a
+*.mp3
+*.wav
+*.db
+.obsidian/
+raw-transcript/*
+!raw-transcript/.gitkeep
