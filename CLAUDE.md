@@ -1,103 +1,92 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code in this repository.
+This file is the **AI Layer** for this project: the always-loaded contract that tells Claude how to think, work, and verify here. Keep it lean; a bloated system prompt starts every session already degraded. Deep reference lives in `README.md` and each skill's `SKILL.md` — link to it, don't inline it.
 
-## What This Repo Is
+---
 
-A Claude Code workspace for an automated voice memo → Obsidian note pipeline. It is a fork of the original by Tony Huang, modified to use **OpenRouter** instead of the OpenAI native audio API.
+## Smart Zone
 
-The pipeline has two stages, each driven by a Claude Code skill:
+LLMs decay over a long context and forget across sessions. The working rules that follow:
+
+- **One job per session.** Plan, implement, and review are separate sessions (see [PIV Loop](#piv-loop)). Don't review code in the same session that wrote it.
+- **Prefer `/clear` over compaction.** Clearing returns you to a known baseline. Re-prime from files instead.
+- **Offload research to sub-agents.** Exploring the codebase or a transcript can burn huge context. Delegate it; pull back only the summary.
+- **Files are the only durable memory.** The handoff between sessions is a written artifact (a plan, a report), never recollection.
+
+## PIV Loop
+
+The per-task inner loop: **Plan → Implement → Validate**. Each phase is a *fresh session*; the plan file is the only interface between Plan and Implement.
+
+1. **Plan** (`/plan`) — New session. Load the task plus the relevant slice of the code, explore (delegate heavy research), and emit a context-rich plan. No code is written.
+2. **Implement** (`/implement`) — Reopen a fresh session. Read the plan, verify its assumptions against the real code, execute task by task, and run the project's checks after every task before moving on.
+3. **Validate** (`/validate`) — Own fresh session. Run the verify gate plus any E2E checklist, then hand to human review. Pass → merge. Problem → drop into System Evolution via `/retroactive`.
+
+Anytime you prompt the same thing more than three times, promote it to a command or skill.
+
+## System Evolution
+
+The outer loop. When a PIV Loop surfaces a bug or a miss, don't just patch the surface code — treat it as a signal that the **AI Layer itself** is incomplete. Run a *retroactive session* (`/retroactive`) and look in four places: the commands, on-demand context, the global rules in this file, and the plan/PRD templates.
+
+## Communication
+
+When reporting information, be extremely concise and sacrifice grammar for the sake of concision.
+
+## Conventions
+
+Behavioral guardrails for every change. These bias toward caution over speed; for trivial tasks, use judgment.
+
+**Think before coding.** State assumptions explicitly; if uncertain, ask. If multiple interpretations exist, surface them all — don't silently pick one.
+
+**Simplicity first.** Write the minimum code that solves the problem. No speculative features, no abstractions for single-use code.
+
+**Surgical changes.** Touch only what the task requires. Match existing style. Remove only the orphans *your* change created; leave pre-existing dead code (mention it instead).
+
+**Verification-led.** Define how you'll verify work *before* doing it. A claim about how an external component behaves (an API's response shape, a config override) is not grounded until a probe has run it — assert it only after the experiment, never from docs alone.
+
+---
+
+### Project specifics
+
+A Claude Code workspace for an automated voice memo → Obsidian note pipeline. A fork of the original by Tony Huang, modified to use **OpenRouter** (base64 audio via `/v1/chat/completions`) instead of the OpenAI native audio API.
+
+**Stack**: Python 3 transcription backend (`voice_transcription_service`, run as a module) · SQLite metadata DB · OpenRouter + `google/gemini-2.5-flash` for audio→text · two Claude Code skills drive the pipeline · Obsidian Markdown output.
+
+**Architecture** — two stages, one skill each:
 
 ```
 voice-memo-recordings/   (raw .m4a audio)
-        ↓  /voice-memo-process
-raw-transcript/                         (plain-text .md transcripts)
-        ↓  /refine-memo-for-obsidian
-Voice-Memo-Vault/    (structured Obsidian notes)
+        ↓  /voice-memo-process      → transcribe via OpenRouter
+raw-transcript/          (plain-text .md transcripts)
+        ↓  /refine-memo-for-obsidian → structure + tag
+Voice-Memo-Vault/        (Obsidian notes with frontmatter)
 ```
 
-## Agent Skills
-
-| Skill | Slash command | SKILL.md |
+| Skill / command | Purpose | Reference |
 |---|---|---|
-| Transcribe audio via OpenRouter | `/voice-memo-process` | `.claude/skills/voice-memo-process/SKILL.md` |
-| Refine transcripts into Obsidian notes | `/refine-memo-for-obsidian` | `.claude/skills/refine-memo-for-obsidian/SKILL.md` |
-| Verify a skill's script runs cleanly | `/prep-agent-skill` | `.claude/commands/prep-agent-skill.md` |
+| `/voice-memo-process` | Sync metadata + transcribe audio | `.claude/skills/voice-memo-process/SKILL.md` |
+| `/refine-memo-for-obsidian` | Refine transcripts into Obsidian notes | `.claude/skills/refine-memo-for-obsidian/SKILL.md` |
+| `/prep-agent-skill` | Verify a skill's script runs cleanly | `.claude/commands/prep-agent-skill.md` |
 
-## Python Script (`voice_transcription_service`)
+- **Transcription backend**: `.claude/skills/voice-memo-process/script/voice_transcription_service/`. SQLite at `script/audio_metadata.db` tracks each file `pending → processing → completed` (or `error`). Config in `config.yaml`; `transcription_mode` switches `chat_completions` (OpenRouter, base64) vs `audio_api` (OpenAI native). Config priority: CLI args → env vars → `config.yaml` → defaults.
+- **All machine-specific paths and the API key live in `.env`** (gitignored, auto-loaded). A fresh clone only edits `.env` (copy from `.env.example`); a leading `~` expands to home. Vars: `OPENAI_API_KEY`, `VOICE_MEMO_DIR`, `RAW_TRANSCRIPT_DIR`, `OBSIDIAN_VAULT_DIR`, `NOTE_PROPERTY_DIR`.
 
-The transcription backend lives at `.claude/skills/voice-memo-process/script/voice_transcription_service/`.
-
-### Install dependencies
-
-```bash
-cd .claude/skills/voice-memo-process
-pip install -r script/voice_transcription_service/requirements.txt
-```
-
-### Key CLI commands
+**Verify commands** (no build/test suite):
 
 ```bash
-# Run from .claude/skills/voice-memo-process/
+# from .claude/skills/voice-memo-process/
 
-# Sync audio metadata from the last 7 days (dry-run preview)
-python -m script.voice_transcription_service sync --days 7 --dry-run --verbose
+# one-time setup (fresh clone has no .venv — it's gitignored):
+python3 -m venv .venv
+./.venv/bin/pip install -r script/voice_transcription_service/requirements.txt
 
-# Transcribe all pending files from the last 7 days
-python -m script.voice_transcription_service transcribe \
-  --from-db --db-status pending --db-days 7 \
-  --workers 4 --max-files 20 --yes
-
-# Reprocess failed files
-python -m script.voice_transcription_service transcribe \
-  --from-db --db-status error --force --yes
-
-# Show help
-python -m script.voice_transcription_service --help
+# verify:
+./.venv/bin/python -m script.voice_transcription_service sync --days 7 --dry-run --verbose
+./.venv/bin/python -m script.voice_transcription_service --help
 ```
+Run via `./.venv/bin/python -m script.voice_transcription_service ...`, not bare `python`/`python3` — the deps (`python-dotenv`, etc.) live in `.venv`, not system Python.
+Run `/prep-agent-skill` to confirm a skill's Python script runs without side effects.
 
-### Configuration
-
-Config file: `.claude/skills/voice-memo-process/script/voice_transcription_service/config.yaml`
-
-Key settings modified from the original fork:
-
-```yaml
-api:
-  base_url: "https://openrouter.ai/api/v1"
-  transcription_mode: "chat_completions"   # uses base64 audio, not /v1/audio/transcriptions
-model:
-  name: "google/gemini-2.5-flash"
-  language: "zh"
-```
-
-Config priority: CLI args → env vars (`TRANSCRIBE_SKILL_*` / `OPENAI_API_KEY`) → `config.yaml` → code defaults.
-
-`.env` at the repo root holds `OPENAI_API_KEY=<openrouter-key>` — the script auto-loads it.
-
-### Two transcription modes
-
-`transcription_mode` in `config.yaml` switches between the two backends:
-
-| Mode | `transcription_mode` | Endpoint | Provider |
-| --- | --- | --- | --- |
-| OpenAI native | `audio_api` | `/v1/audio/transcriptions` | OpenAI |
-| Chat completions | `chat_completions` | `/v1/chat/completions` (base64 audio) | OpenRouter (or any provider lacking the audio endpoint) |
-
-Current repo default is `chat_completions` with `google/gemini-2.5-flash` via OpenRouter. To use OpenAI native, set `transcription_mode: "audio_api"`, clear `base_url`, and use an OpenAI model name (e.g. `gpt-4o-transcribe`).
-
-### Fork differences vs. upstream
-
-- `config.py` adds `base_url` and `transcription_mode` fields.
-- `transcription.py` adds `_transcribe_via_chat()`: encodes audio as base64 and posts to `/v1/chat/completions`.
-
-### Database
-
-SQLite at `.claude/skills/voice-memo-process/script/audio_metadata.db`. Tracks each audio file through states: `pending → processing → completed` (or `error`). Status updates happen atomically alongside transcription.
-
-## Obsidian Note Structure
-
-Refined notes written to `~/Documents/mdNote/Voice-Memo-Vault/` follow this exact structure (no additional section headings):
+**Refined note structure** — written to `OBSIDIAN_VAULT_DIR`, exactly this shape, no extra headings:
 
 ```markdown
 ---
@@ -116,4 +105,8 @@ tags:
 <body — oral style converted to writing style, paragraphed, no sub-headings>
 ```
 
-Tags are defined in `note-property/tag-list.md`. Only use tags from that file.
+**Do-not**:
+- Never hardcode machine paths — read them from `.env`. The pipeline reads no hardcoded paths.
+- Only use tags defined in `note-property/tag-list.md`; never invent new ones.
+- Never commit `.env` (it holds the API key); keep `.env.example` in sync when adding a variable.
+- Preserve the refined-note structure above exactly — frontmatter keys, `## Note Summary`, no other section headings.

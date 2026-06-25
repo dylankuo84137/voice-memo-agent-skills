@@ -21,7 +21,8 @@ Voice-Memo-Vault/       ←  structured Obsidian notes with frontmatter & tags
 | Path | Purpose |
 |---|---|
 | `raw-transcript/` | Raw transcription output (plain text `.md`) |
-| `.env` | API key (`OPENAI_API_KEY` for OpenRouter) |
+| `.env` | API key + machine-specific paths (gitignored) |
+| `.env.example` | Template to copy to `.env` |
 | `note-property/tag-list.md` | Canonical tag definitions for vault tagging |
 
 ## Agent Skills
@@ -44,11 +45,26 @@ Cleans up raw transcripts into Obsidian-ready notes.
 
 ## Configuration
 
-`.env` holds:
+All machine-specific settings live in `.env` (gitignored). On a fresh clone,
+copy the template and edit it:
+
+```bash
+cp .env.example .env
+```
+
+`.env` holds the API key and every path the pipeline uses (a leading `~`
+expands to your home directory):
 
 ```env
 OPENAI_API_KEY=<your-openrouter-api-key>
+VOICE_MEMO_DIR=~/gdrive/Inbox/voice-memo-recordings   # raw .m4a recordings
+RAW_TRANSCRIPT_DIR=~/Documents/voice-memo-agent-skills/raw-transcript
+OBSIDIAN_VAULT_DIR=~/Documents/mdNote/Voice-Memo-Vault # refined notes destination
+NOTE_PROPERTY_DIR=~/Documents/voice-memo-agent-skills/note-property
 ```
+
+Because the paths come from `.env`, nothing in `config.yaml` or the skills is
+hardcoded to a machine — running on a new computer only requires editing `.env`.
 
 The transcription pipeline targets OpenRouter (`https://openrouter.ai/api/v1`) with `google/gemini-2.5-flash` by default.
 

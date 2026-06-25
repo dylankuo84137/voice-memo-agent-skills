@@ -10,12 +10,17 @@ allowed-tools: Read, Write, Grep, Glob, Bash
 
 Refine voice-memo transcripts one file at a time into Obsidian-style markdown notes.
 
-You have two project filepaths to manage your work:
+**Before anything else, load the working paths from the repo-root `.env` file**
+(read `.env`, or copy `.env.example` to `.env` first if it is missing). These
+variables define every directory this skill touches — never hardcode paths:
 
-- `~/Documents/voice-memo-agent-skills/raw-transcript`: directory where voice-memo transcripts to be processed
-- `~/Documents/mdNote/Voice-Memo-Vault/`: directory where the refined markdown notes should be saved
+- `RAW_TRANSCRIPT_DIR`: directory where voice-memo transcripts to be processed
+- `OBSIDIAN_VAULT_DIR`: directory where the refined markdown notes should be saved
+- `NOTE_PROPERTY_DIR`: directory holding the canonical tag list (`tag-list.md`)
 
-You will ONLY use tags from `~/Documents/voice-memo-agent-skills/note-property`
+A leading `~` in any value expands to the user's home directory.
+
+You will ONLY use tags from the `NOTE_PROPERTY_DIR` directory.
 
 ## Target File Structure Example
 
@@ -47,11 +52,11 @@ tags:
 ## Procedures
 
 **Step-1: Target Confirm**
-List files under 'raw-transcript' and confirm with the user on the target.
+List files under `RAW_TRANSCRIPT_DIR` and confirm with the user on the target.
 Then you will process one file at a time.
 
 **Step-2: Move Raw File**
-Move the target files to `~/Documents/mdNote/Voice-Memo-Vault/` directory.
+Move the target files to the `OBSIDIAN_VAULT_DIR` directory.
 
 **Step-3: Transcript Refine**
 Use File Structure Example as reference, update your target file one by one.

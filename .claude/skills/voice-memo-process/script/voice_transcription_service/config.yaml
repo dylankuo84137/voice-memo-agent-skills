@@ -80,9 +80,10 @@ files:
 # Default locations for discovering voice memos (not auto-scanned by default).
 # Can be used by external wrappers or future `ingest` commands.
 sources:
-  # Default directory where voice memos are stored
-  # Use an absolute path or shell-tilde-expansion path.
-  voice_memo_directory: "~/gdrive/Inbox/voice-memo-recordings"
+  # Default directory where voice memos are stored.
+  # Machine-specific — DEFINED IN repo-root .env as VOICE_MEMO_DIR (takes precedence).
+  # Leave blank here so the path is configured in one place (.env).
+  voice_memo_directory: ""
   # Default synchronization date range (days) for DB selections
   # Used when --db-days is not provided on CLI
   default_sync_days: 30
@@ -92,10 +93,11 @@ sources:
 # -------------------------------------------------------------------------
 # Controls where and how transcripts are saved
 output:
-  # Default directory for saving transcripts (relative or absolute path)
-  # Can be overridden with --output-dir command-line argument
-  # Relative paths are resolved from the script execution directory
-  directory: "~/Documents/voice-memo-agent-skills/raw-transcript"
+  # Default directory for saving transcripts.
+  # Machine-specific — DEFINED IN repo-root .env as RAW_TRANSCRIPT_DIR (takes precedence).
+  # Can also be overridden with the --output-dir command-line argument.
+  # Leave blank here so the path is configured in one place (.env).
+  directory: ""
 
   # File extension for transcript output files
   # Output filename format: voice-memo_YYYYMMDD_HHMMSS<suffix>
