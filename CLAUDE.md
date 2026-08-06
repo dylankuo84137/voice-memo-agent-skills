@@ -86,7 +86,9 @@ python3 -m venv .venv
 Run via `./.venv/bin/python -m script.voice_transcription_service ...`, not bare `python`/`python3` — the deps (`python-dotenv`, etc.) live in `.venv`, not system Python.
 Run `/prep-agent-skill` to confirm a skill's Python script runs without side effects.
 
-**Refined note structure** — written to `OBSIDIAN_VAULT_DIR`, exactly this shape, no extra headings:
+**Refined note structure** — written to `OBSIDIAN_VAULT_DIR` as
+`voice-memo_<YYYYMMDD_HHMMSS>_<title>.md` (timestamp prefix from the transcript,
+title from frontmatter), exactly this shape, no extra headings:
 
 ```markdown
 ---

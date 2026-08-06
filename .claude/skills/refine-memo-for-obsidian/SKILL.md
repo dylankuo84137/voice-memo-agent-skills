@@ -61,6 +61,26 @@ Move the target files to the `OBSIDIAN_VAULT_DIR` directory.
 **Step-3: Transcript Refine**
 Use File Structure Example as reference, update your target file one by one.
 
+**Step-4: Rename with Title**
+Rename the refined note so its subject is readable at a glance, keeping the
+original timestamp prefix intact:
+
+```
+voice-memo_<YYYYMMDD_HHMMSS>_<title>.md
+```
+
+- `<title>` is the frontmatter `title` value, without its surrounding quotes.
+- Strip the characters `\ / : * ? " < > | # ^ [ ]` (they break filesystems or
+  Obsidian wikilinks) — drop them, or use the full-width form when it reads
+  better (`：`, `？`). Full-width punctuation is safe and needs no change.
+- Collapse runs of whitespace to one space; trim leading/trailing spaces, dots
+  and dashes.
+- Cap `<title>` at 80 characters; cut on a word/clause boundary, no ellipsis.
+- If the target name already exists, append `-2`, `-3`, … before `.md`.
+
+The `title` frontmatter keeps the full untruncated title — the filename is the
+readable label, not the source of truth.
+
 ### QA
 
 **What if I did not find any raw transcripts to be processed?**

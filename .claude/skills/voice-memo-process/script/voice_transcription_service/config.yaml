@@ -49,6 +49,8 @@ model:
   # Response format from the API
   # Options: "text", "json", "verbose_json", "srt", "vtt"
   # "text" returns plain transcript text (recommended for most use cases)
+  # NOTE: applies to transcription_mode "audio_api" only — chat completions has
+  # no equivalent and ignores this setting.
   response_format: "text"
 
   # Prompt to guide the transcription model

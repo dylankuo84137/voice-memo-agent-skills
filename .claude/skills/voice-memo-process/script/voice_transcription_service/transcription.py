@@ -15,10 +15,27 @@ class TranscriptionService:
 
     def __init__(self, config: SkillConfig):
         self.config = config
-        client_kwargs = {"api_key": config.api_key}
-        if config.base_url:
-            client_kwargs["base_url"] = config.base_url
-        self.client = OpenAI(**client_kwargs)
+        self._client: OpenAI | None = None
+
+    @property
+    def client(self) -> OpenAI:
+        """Built on first use so `sync` and `--dry-run` need no API key."""
+
+        if self._client is None:
+            client_kwargs = {"api_key": self.config.api_key}
+            if self.config.base_url:
+                client_kwargs["base_url"] = self.config.base_url
+            self._client = OpenAI(**client_kwargs)
+        return self._client
+
+    def ensure_client(self) -> None:
+        """Build the client up front, before any row is marked 'processing'.
+
+        Without this the lazy property defers a bad base_url or proxy setting
+        until inside the per-file loop, failing every target one by one.
+        """
+
+        _ = self.client
 
     def transcribe(self, audio_path: Path) -> str:
         """Transcribe an audio file into text using configured parameters."""
@@ -68,6 +85,7 @@ class TranscriptionService:
 
         response = self.client.chat.completions.create(
             model=self.config.model,
+            temperature=self.config.temperature,
             messages=[
                 {
                     "role": "user",

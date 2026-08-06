@@ -113,7 +113,7 @@ python -m voice_transcription_service sync --dry-run --verbose
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--path` | Override voice memo directory from config | `sources.voice_memo_directory` |
-| `--days` | Only sync files modified within last N days | `sources.default_sync_days` (30) |
+| `--days` | Only sync files whose *mtime* is within last N days (not recording time — cf. `--db-days`) | `sources.default_sync_days` (30) |
 | `--dry-run` | Preview files without actually ingesting | false |
 | `--verbose` | Print detailed sync information | false |
 
@@ -219,7 +219,7 @@ python -m voice_transcription_service transcribe \
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--path` | Override voice memo directory path from config | `sources.voice_memo_directory` |
-| `--days` | Only sync files modified within last N days | `sources.default_sync_days` (30) |
+| `--days` | Only sync files whose *mtime* is within last N days (not recording time — cf. `--db-days`) | `sources.default_sync_days` (30) |
 | `--dry-run` | Preview files without ingesting | false |
 | `--verbose` | Print detailed sync information | false |
 
@@ -232,7 +232,7 @@ python -m voice_transcription_service transcribe \
 | `files` | Explicit audio file paths (positional arguments) | - |
 | `--from-db` | Select files via database filters | false |
 | `--db-status` | Filter by status (pending/processing/completed/error) | - |
-| `--db-days` | Only include files created within last N days | `sources.default_sync_days` (30) |
+| `--db-days` | Only include files whose *recording start* is within the last N days | none — no time window |
 | `--db-limit` | Maximum number of database records to fetch | - |
 | `--db-offset` | Skip first N database records | 0 |
 
@@ -244,7 +244,7 @@ python -m voice_transcription_service transcribe \
 | `--workers` | Number of concurrent threads | 1 |
 | `--max-files` | Maximum files allowed in this run | `safeguards.default_max_files` (10) |
 | `--yes` | Auto-confirm (skip confirmation prompt) | false |
-| `--dry-run` | Preview mode (don't actually call API) | false |
+| `--dry-run` | Preview mode: no API call and no database write of any kind | false |
 | `--force` | Force process completed files | false |
 | `--verbose` | Verbose output mode | false |
 
@@ -346,21 +346,78 @@ System has three layers of safety safeguards:
 ```sql
 CREATE TABLE audio_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename TEXT NOT NULL UNIQUE,          -- Filename (unique)
-    file_path TEXT NOT NULL,                -- Full file path
+    filename TEXT NOT NULL,                 -- Filename
+    file_path TEXT NOT NULL UNIQUE,         -- Full file path (unique key)
     file_size INTEGER NOT NULL,             -- File size (bytes)
-    created_at TEXT NOT NULL,               -- File creation time
+    created_at TEXT NOT NULL,               -- Recording start time (see below)
     modified_at TEXT NOT NULL,              -- File modification time
     status TEXT NOT NULL DEFAULT 'pending', -- Status: pending/processing/completed/error
     status_updated_at TEXT,                 -- Status update time
-    output_path TEXT,                       -- Transcription output path
+    output_path TEXT,                       -- Transcription output directory (see below)
     output_filename TEXT,                   -- Transcription output filename
     attempt_count INTEGER DEFAULT 0,        -- Attempt count
     last_attempt_at TEXT,                   -- Last attempt time
     last_error TEXT,                        -- Last error message
-    synced_at TEXT                          -- Sync time
+    synced_at TEXT,                         -- Sync time
+    processing_owner TEXT                   -- hostname:pid holding 'processing' (see below)
 );
 ```
+
+Databases created before the key moved to `file_path` are migrated automatically
+on the next run; keying on the bare filename made two same-named memos in
+different folders collide. The rewrite runs inside one explicit transaction —
+sqlite3 auto-commits bare DDL, so without it a crash partway through would leave
+an empty new table that the next run reads as "already migrated".
+
+Because the key is now the path, a memo that *moves* would look like a brand-new
+file. `ingest_file` therefore adopts an existing row whose filename, size *and*
+mtime match and whose recorded path no longer resolves, instead of inserting a
+duplicate and transcribing it a second time. Name and size alone are too weak:
+iOS reuses names, so a fresh recording that happened to match a deleted memo's
+name and byte count would inherit that row's `completed` status and never be
+transcribed. Matching mtime too makes adoption mean "the same bytes, at a new
+path" — a move preserves mtime, a different recording does not.
+
+`created_at` is the moment the recording *started*, resolved by
+`recording_time.py` from the filename (`6月25日 22-48.m4a`), falling back to the
+container metadata via `ffprobe`, then to the file's mtime. It is not the
+filesystem creation time. The filename carries no year, so the year is inferred
+from mtime — which only works while mtime still sits close behind the recording.
+Past a week, the filename step abstains rather than guess (a memo re-downloaded
+from cloud storage two years later would otherwise be stamped with this year),
+and resolution falls through to `ffprobe`, which carries the real year. Rows written before this change stored the filesystem
+timestamp, and sync never revisits a path it already knows — so every `sync`
+first re-derives `created_at` from the filename (a regex, no I/O) and repairs any
+row still on the old basis, keeping one clock across the table.
+
+A row that already produced a transcript is the exception: its `created_at` is
+baked into the note name on disk (`voice-memo_<YYYYMMDD_HHMMSS>_<title>.md`), so
+moving it would leave the database unable to name a file it wrote. The repair
+touches such a row only when the new timestamp is the one its own
+`output_filename` already carries — pulling the row back into line with the disk,
+never away from it. Rows with an output whose name cannot be checked (no
+filename recorded) are left as they are.
+
+Note this makes `--db-days` a window on *recording* time, not on when the file
+reached this machine: a memo recorded months ago but synced today sits outside
+any recent window. That is why `--db-days` now defaults to no window at all.
+The two day-flags therefore read different clocks — `sync --days` filters on the
+file's mtime (when it landed here), `transcribe --db-days` on `created_at` (when
+it was recorded). The same N gives different sets.
+
+The filename carries no year, so it is taken from the file's mtime, stepping back
+one year if that lands in the future. A memo older than roughly a year — or one
+copied here with a fresh mtime — therefore resolves to the wrong year silently;
+`ffprobe` is not consulted, because the filename matched.
+
+**Known limitation — `output_path` is written, never read.** This service records
+where it wrote the transcript. The refine stage then consumes that transcript and
+writes its note into `OBSIDIAN_VAULT_DIR` under the same filename, without
+updating this column, so the value goes stale as soon as the transcript moves.
+Nothing in the pipeline reads it back: the two stages are coupled by
+`RAW_TRANSCRIPT_DIR`, not by this database. Treat it as a last-known-location
+hint. (The existing rows were repaired by hand to point at each note's current
+location; one row whose output no longer exists anywhere was set to NULL.)
 
 ### Status Flow
 
@@ -368,7 +425,45 @@ CREATE TABLE audio_files (
 pending → processing → completed
                 ↓
               error
+
+processing → pending    (reclaimed, see below)
 ```
+
+A run killed mid-flight leaves its row in `processing`, where `--db-status
+pending` can no longer see it. The next run hands any row idle there for more
+than `STALE_PROCESSING_MINUTES` (60) back to `pending` — unless the run that
+claimed it is still alive. Rows in `error` stay put until you select them
+explicitly with `--db-status error`.
+
+Age alone does not mean abandoned: the memo directory is a FUSE mount, so a read
+inside a transcription can block with no timeout, and a run genuinely still
+working on a file can hold its row well past an hour. `mark_processing` therefore
+stamps the row with `processing_owner` (`hostname:pid`), and the reclaim skips
+any row whose owner process is still running on this host — otherwise a second
+run started in another terminal would pay for the same audio again and write over
+the transcript the first run is about to produce. Rows with no owner recorded
+(claimed before this column existed, or claimed on another machine) fall back to
+the time rule alone. The column is cleared when the file reaches `completed`,
+`error`, or is reclaimed. Databases created before it are migrated in place with
+a single `ALTER TABLE ... ADD COLUMN` on the next run.
+
+`--dry-run` never writes to the database — but it has to *see* the writes the
+real run performs first (the schema migration, the reclaim pass, the `created_at`
+repair), or it would preview a different set of files than the run it is
+previewing. So it performs them against a throwaway copy of the database file and
+reports them as "Would reclaim" / "Would repair". The real file is left
+byte-identical, and one that does not exist yet is not created at all; a
+present-but-empty file is fine, the copy gets the schema. A file named explicitly
+on the command line is still not ingested: it is listed as `not-yet-synced`
+rather than registered as `pending`, since merely looking at a file must not
+queue it for the next `--from-db` batch to transcribe.
+
+The preview reports the safeguards rather than failing on them: it prints its
+selection, then — if the batch exceeds `--max-files` or would need `--yes` — one
+line saying a real run would stop there, and exits 0. Since `--db-days` defaults
+to no window, the documented preview of every pending row routinely exceeds the
+limit, and answering "what would this run?" with an error makes the preview
+useless. The limits still refuse the real run.
 
 - **pending**: Initial state, waiting for processing
 - **processing**: Currently transcribing
@@ -476,6 +571,17 @@ Example:
 - Output: `voice-memo_20250321_143045.md`
 
 Note: If the database has no creation time information (rare case), it falls back to using the file's modified time for `YYYYMMDD_HHMMSS`.
+
+That stamp is minute-precision and usually derived from the filename, so two
+same-named memos in different folders resolve to the *same* name — a collision
+the old `UNIQUE(filename)` schema hid by never storing the second memo at all.
+The first writer keeps the plain name and later ones get `-2`, `-3`; the name is
+claimed both with an exclusive create and in `output_filename`, so parallel
+workers cannot both take it. The database half of the claim matters once the
+refine stage moves a transcript into the vault: the name is then free on disk,
+but still spoken for. Re-transcribing a file reuses whatever name it was written
+under before, so `--force` overwrites its own transcript rather than growing a
+second copy.
 
 ### Q8: How does file synchronization work?
 
