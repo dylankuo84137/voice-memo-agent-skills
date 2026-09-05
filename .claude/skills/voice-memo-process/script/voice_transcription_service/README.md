@@ -328,6 +328,8 @@ Configuration loading follows this priority (high to low):
 | `TRANSCRIBE_SKILL_MAX_FILES` | `safeguards.default_max_files` | Default max files |
 | `TRANSCRIBE_SKILL_CONFIRM_THRESHOLD` | `safeguards.confirmation_threshold` | Confirmation threshold |
 | `TRANSCRIBE_SKILL_SKIP_COMPLETED` | `safeguards.skip_completed_by_default` | Skip completed files |
+| `TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS` | `retry.max_attempts` | Total API attempts per file (incl. the first) |
+| `TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS` | `retry.backoff_seconds` | Base retry delay, doubled each attempt |
 
 ### Safety Safeguards
 
@@ -336,6 +338,47 @@ System has three layers of safety safeguards:
 1. **File Count Limit**: Default max 10 files (overridable with `--max-files`)
 2. **Confirmation Threshold**: Requires `--yes` confirmation when > 3 files
 3. **Auto-Skip Completed**: Default skips files with `completed` status (unless using `--force`)
+
+### Retry Behaviour
+
+A 200 response does not guarantee a transcript. Two shapes arrive empty, both
+proven transient — replaying the identical payload immediately afterwards
+returned a full transcript:
+
+1. **Empty content** — `choices[0].message.content` is `""` or `None`.
+2. **No `choices`** — the body omits the key, or carries `"choices": null`.
+   Before this was handled, that surfaced as
+   `TypeError: 'NoneType' object is not subscriptable`, which named nothing.
+
+`TranscriptionService.transcribe` retries only these two shapes: up to
+`retry.max_attempts` (default 3) total attempts, sleeping
+`retry.backoff_seconds` doubled each time (2s, then 4s). Each retry prints to
+stderr as it happens:
+
+```
+↻ 9月5日 21-59 週回顧.m4a: attempt 1 of 3 returned no transcript
+  (model=google/gemini-2.5-pro; finish_reason='stop'; content='';
+   tokens=prompt:38000/completion:0; reasoning_tokens=3589); retrying in 2s
+```
+
+When the bound is exhausted the file ends as `error` with that same diagnostic
+recorded in `last_error` — `finish_reason`, whether `choices` was absent, any
+`error` object in the body, and token usage including reasoning tokens.
+
+**Cost.** Every attempt is a separately billed call on the full audio payload,
+so `max_attempts` is a cost ceiling, not just a patience setting: worst case is
+`max_attempts × per-call cost` (~$0.045–$0.075 per attempt for an 18 MB file on
+`google/gemini-2.5-pro`). Reasoning models make shape 1 more likely — they can
+spend their whole output budget on reasoning tokens before emitting content —
+so exposure rises with the model choice. Set `max_attempts: 1` to disable
+retrying entirely.
+
+**Boundary with the SDK's own retries.** The `openai` client already retries
+HTTP 408, 409, 429 and ≥500, plus connection errors and timeouts, with
+`max_retries=2` (3 calls). Those are *not* counted here and are not
+double-retried. Everything else — authentication failure, a 4xx that will never
+succeed, an unsupported format, an oversize file — fails on the first attempt
+with no backoff sleep.
 
 ## Database Management
 
@@ -446,6 +489,13 @@ the transcript the first run is about to produce. Rows with no owner recorded
 the time rule alone. The column is cleared when the file reaches `completed`,
 `error`, or is reclaimed. Databases created before it are migrated in place with
 a single `ALTER TABLE ... ADD COLUMN` on the next run.
+
+`attempt_count` counts **runs, not network attempts**. Retries happen inside
+`TranscriptionService.transcribe`, beneath the single `mark_processing` →
+`mark_error` pair in `workflow.py`, so a file that only succeeded on its third
+API call still shows `attempt_count = 1`, and a file that exhausted its retries
+lands in `error` once with the full diagnostic in `last_error`. To count API
+calls, read the `↻` lines on stderr.
 
 `--dry-run` never writes to the database — but it has to *see* the writes the
 real run performs first (the schema migration, the reclaim pass, the `created_at`
@@ -632,6 +682,7 @@ OpenAI API wrapper, handles:
 - Audio file validation (format, size)
 - API calls (Whisper Transcription)
 - Response parsing and error handling
+- Bounded retry for transcript-less responses
 
 ### workflow.py
 Workflow orchestration, coordinates:
@@ -655,7 +706,17 @@ This project is community member use only.
 
 ## Changelog
 
-### v2.1 (Current Version)
+### v2.2 (Current Version)
+- Bounded retry for 200 responses that carry no transcript (empty content, or a
+  body with no `choices`) — see [Retry Behaviour](#retry-behaviour)
+- New `retry.max_attempts` / `retry.backoff_seconds` config, with matching
+  `TRANSCRIBE_SKILL_RETRY_*` environment variables
+- Exhausted retries now report `finish_reason`, absent `choices`, the body's
+  `error` object and token usage instead of `'NoneType' object is not subscriptable`
+- Non-retryable errors (auth, 4xx, bad format, oversize file) still fail fast
+- Documented `attempt_count` as counting runs, not network attempts
+
+### v2.1
 - Added `sync` command for file discovery and database ingestion
 - Support for `--days` filter using `default_sync_days` config
 - Dry-run mode for sync preview
@@ -670,6 +731,6 @@ This project is community member use only.
 
 ---
 
-**Last Updated**: 2025-10-24
+**Last Updated**: 2026-09-06
 **author**: Tony Huang (https://www.youtube.com/@tonyhhq)
-**date-updated**: 2025-10-24
+**date-updated**: 2026-09-06

@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import base64
+import sys
+import time
 from pathlib import Path
 
 from openai import OpenAI
 
 from .config import SkillConfig
+
+
+class EmptyTranscriptionError(RuntimeError):
+    """The API answered 200 but carried no usable transcript.
+
+    Proven transient in practice: the identical payload replayed straight
+    away came back with a full transcript. Distinct from every other
+    failure so the retry loop can catch this and nothing else — an auth
+    failure or an oversize file must not buy three backoff sleeps.
+    """
 
 
 class TranscriptionService:
@@ -56,9 +68,33 @@ class TranscriptionService:
                 f"{self.config.max_file_size_mb} MB"
             )
 
-        if self.config.transcription_mode == "chat_completions":
-            return self._transcribe_via_chat(audio_path)
-        return self._transcribe_via_audio_api(audio_path)
+        attempts = max(self.config.retry.max_attempts, 1)
+        last_error: EmptyTranscriptionError | None = None
+
+        # The retry lives here, under workflow's mark_processing/mark_error
+        # pair, so a retried file passes through the DB state machine exactly
+        # once. attempt_count therefore keeps counting runs, not network calls.
+        for attempt in range(1, attempts + 1):
+            try:
+                if self.config.transcription_mode == "chat_completions":
+                    return self._transcribe_via_chat(audio_path)
+                return self._transcribe_via_audio_api(audio_path)
+            except EmptyTranscriptionError as exc:
+                last_error = exc
+                if attempt == attempts:
+                    break
+                delay = self.config.retry.backoff_seconds * (2 ** (attempt - 1))
+                # flush: the loop sleeps next, and under --workers N nothing
+                # would reach the operator until the process exited.
+                print(
+                    f"↻ {audio_path.name}: attempt {attempt} of {attempts} returned "
+                    f"no transcript ({exc}); retrying in {delay:.0f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
+
+        raise ValueError(f"No transcript after {attempts} attempt(s): {last_error}")
 
     def _transcribe_via_audio_api(self, audio_path: Path) -> str:
         """Use OpenAI native audio transcription endpoint."""
@@ -73,10 +109,17 @@ class TranscriptionService:
             )
 
         if isinstance(response, str):
-            return response
-        if hasattr(response, "text"):
-            return response.text  # type: ignore[return-value]
-        return str(response)
+            text = response
+        elif hasattr(response, "text"):
+            text = response.text  # type: ignore[assignment]
+        else:
+            text = str(response)
+
+        if not text.strip():
+            raise EmptyTranscriptionError(
+                f"model={self.config.model}; audio_api returned no text"
+            )
+        return text
 
     def _transcribe_via_chat(self, audio_path: Path) -> str:
         """Transcribe via chat completions with base64-encoded audio (OpenRouter format)."""
@@ -109,4 +152,42 @@ class TranscriptionService:
                 }
             ],
         )
-        return response.choices[0].message.content or ""
+        choices = getattr(response, "choices", None)
+        content = ""
+        if choices:
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None) or ""
+        if not content.strip():
+            raise EmptyTranscriptionError(self._describe_chat_response(response))
+        return content
+
+    def _describe_chat_response(self, response) -> str:
+        """Summarise a transcript-less response for the operator.
+
+        'NoneType' object is not subscriptable told nobody anything; diagnosing
+        it took an out-of-band replay of the payload. Report what came back.
+        """
+
+        parts = [f"model={self.config.model}"]
+        choices = getattr(response, "choices", None)
+        if not choices:
+            parts.append("no choices in response")
+        else:
+            first = choices[0]
+            parts.append(f"finish_reason={getattr(first, 'finish_reason', None)!r}")
+            message = getattr(first, "message", None)
+            parts.append(f"content={getattr(message, 'content', None)!r}")
+        error = getattr(response, "error", None)
+        if error:
+            parts.append(f"error={error}")
+        usage = getattr(response, "usage", None)
+        if usage:
+            parts.append(
+                f"tokens=prompt:{getattr(usage, 'prompt_tokens', '?')}"
+                f"/completion:{getattr(usage, 'completion_tokens', '?')}"
+            )
+            details = getattr(usage, "completion_tokens_details", None)
+            reasoning = getattr(details, "reasoning_tokens", None)
+            if reasoning:
+                parts.append(f"reasoning_tokens={reasoning}")
+        return "; ".join(parts)

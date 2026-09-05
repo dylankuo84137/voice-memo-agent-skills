@@ -33,7 +33,7 @@ model:
   # Model name for transcription
   # OpenAI: "gpt-4o-transcribe", "gpt-4o-mini-transcribe"
   # OpenRouter: "google/gemini-2.5-flash", "openai/gpt-4o-transcribe"
-  name: "google/gemini-2.5-flash"
+  name: "google/gemini-2.5-pro"
 
   # Language code for the audio content (ISO 639-1 format)
   # Common values: "zh" (Chinese), "en" (English), "ja" (Japanese), etc.
@@ -144,3 +144,24 @@ safeguards:
   # Set to false to always reprocess all selected files
   # Can be overridden with --force command-line flag
   skip_completed_by_default: true
+
+# -------------------------------------------------------------------------
+# Retry Behaviour
+# -------------------------------------------------------------------------
+# Bounded retry for a 200 response that arrives with no transcript (empty
+# content, or a body with no "choices"). Observed transient on OpenRouter and
+# more likely on reasoning models, which may spend their whole budget on
+# reasoning tokens before emitting content.
+#
+# COST: every attempt is a separately billed call on the full audio payload
+# (~$0.045-$0.075 per attempt for an 18 MB file on google/gemini-2.5-pro), so
+# max_attempts is a cost ceiling: worst case = max_attempts x per-call cost.
+#
+# Not counted here: HTTP 408/409/429/5xx, connection errors and timeouts are
+# already retried twice by the openai client itself.
+retry:
+  # Total API attempts per file, including the first. 1 disables retrying.
+  max_attempts: 3
+
+  # Base delay before a retry, doubling each time (2s, then 4s).
+  backoff_seconds: 2.0
