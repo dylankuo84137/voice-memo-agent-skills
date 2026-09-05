@@ -29,6 +29,20 @@ class SafeguardSettings:
 
 
 @dataclass
+class RetrySettings:
+    """Bounded retry for a 200 that carries no transcript.
+
+    Each attempt is a fresh, separately billed API call on a multi-megabyte
+    payload, so the bound is a cost ceiling, not just a patience setting.
+    Transport-level transients (429, 5xx, connection, timeout) are already
+    retried by the openai client and are not counted here.
+    """
+
+    max_attempts: int = 3
+    backoff_seconds: float = 2.0
+
+
+@dataclass
 class SkillConfig:
     """Runtime configuration for script."""
 
@@ -58,6 +72,7 @@ class SkillConfig:
     database_timeout: float = 10.0
 
     safeguards: SafeguardSettings = field(default_factory=SafeguardSettings)
+    retry: RetrySettings = field(default_factory=RetrySettings)
 
     @staticmethod
     def _load_env() -> None:
@@ -88,6 +103,7 @@ class SkillConfig:
             raw: Dict[str, Any] = yaml.safe_load(f) or {}
 
         safeguards_data = raw.get("safeguards", {})
+        retry_data = raw.get("retry", {})
 
         return cls(
             api_key=None,  # YAML never carries secrets
@@ -111,6 +127,10 @@ class SkillConfig:
                 default_max_files=int(safeguards_data.get("default_max_files", 5)),
                 confirmation_threshold=int(safeguards_data.get("confirmation_threshold", 3)),
                 skip_completed_by_default=bool(safeguards_data.get("skip_completed_by_default", True)),
+            ),
+            retry=RetrySettings(
+                max_attempts=int(retry_data.get("max_attempts", 3)),
+                backoff_seconds=float(retry_data.get("backoff_seconds", 2.0)),
             ),
         )
 
@@ -147,6 +167,10 @@ class SkillConfig:
                 default_max_files=int(os.getenv("TRANSCRIBE_SKILL_MAX_FILES", "5")),
                 confirmation_threshold=int(os.getenv("TRANSCRIBE_SKILL_CONFIRM_THRESHOLD", "3")),
                 skip_completed_by_default=os.getenv("TRANSCRIBE_SKILL_SKIP_COMPLETED", "true").lower() == "true",
+            ),
+            retry=RetrySettings(
+                max_attempts=int(os.getenv("TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS", "3")),
+                backoff_seconds=float(os.getenv("TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS", "2.0")),
             ),
         )
 
@@ -195,6 +219,8 @@ class SkillConfig:
                 "safeguards_default_max_files": os.getenv("TRANSCRIBE_SKILL_MAX_FILES"),
                 "safeguards_confirmation_threshold": os.getenv("TRANSCRIBE_SKILL_CONFIRM_THRESHOLD"),
                 "safeguards_skip_completed": os.getenv("TRANSCRIBE_SKILL_SKIP_COMPLETED"),
+                "retry_max_attempts": os.getenv("TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS"),
+                "retry_backoff_seconds": os.getenv("TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS"),
             }
 
             if env_values["api_key"]:
@@ -248,6 +274,14 @@ class SkillConfig:
 
             config.safeguards = safeguards
 
+            retry = config.retry
+            if env_values["retry_max_attempts"]:
+                retry.max_attempts = int(env_values["retry_max_attempts"])
+            if env_values["retry_backoff_seconds"]:
+                retry.backoff_seconds = float(env_values["retry_backoff_seconds"])
+
+            config.retry = retry
+
         return config
 
     def validate(self) -> None:
@@ -262,6 +296,10 @@ class SkillConfig:
             raise ValueError("Temperature must be between 0.0 and 1.0")
         if not self.supported_formats:
             raise ValueError("At least one supported audio format must be configured")
+        if self.retry.max_attempts < 1:
+            raise ValueError("retry.max_attempts must be at least 1")
+        if self.retry.backoff_seconds < 0:
+            raise ValueError("retry.backoff_seconds must not be negative")
 
     def resolve_database_path(self, base_dir: Optional[Path] = None) -> Path:
         """Resolve the configured database path relative to a base directory."""
