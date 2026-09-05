@@ -49,7 +49,7 @@ Behavioral guardrails for every change. These bias toward caution over speed; fo
 
 A Claude Code workspace for an automated voice memo → Obsidian note pipeline. A fork of the original by Tony Huang, modified to use **OpenRouter** (base64 audio via `/v1/chat/completions`) instead of the OpenAI native audio API.
 
-**Stack**: Python 3 transcription backend (`voice_transcription_service`, run as a module) · SQLite metadata DB · OpenRouter + `google/gemini-2.5-flash` for audio→text · two Claude Code skills drive the pipeline · Obsidian Markdown output.
+**Stack**: Python 3 transcription backend (`voice_transcription_service`, run as a module) · SQLite metadata DB · OpenRouter + `google/gemini-2.5-pro` for audio→text · two Claude Code skills drive the pipeline · Obsidian Markdown output.
 
 **Architecture** — two stages, one skill each:
 

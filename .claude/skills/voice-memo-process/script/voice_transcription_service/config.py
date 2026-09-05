@@ -18,6 +18,16 @@ except ImportError:  # pragma: no cover - optional dependency
 
 DEFAULT_SUPPORTED_FORMATS = [".m4a", ".mp3", ".wav", ".mp4"]
 
+# Kept in sync with `model.prompt` in config.yaml, which is where it is
+# normally set and where the reasoning for each clause is recorded. This is the
+# fallback for a config.yaml that is missing the key, so it must not contradict
+# it: the previous default asked, in Simplified Chinese, for Simplified output.
+DEFAULT_PROMPT = (
+    "Output in Traditional Chinese (Taiwan, 繁體中文) only — never Simplified "
+    "Chinese. Add appropriate punctuation. Transcribe verbatim: do not "
+    "summarise, omit, or rephrase."
+)
+
 
 @dataclass
 class SafeguardSettings:
@@ -54,7 +64,7 @@ class SkillConfig:
     language: str = "zh"
     temperature: float = 0.2
     response_format: str = "text"
-    prompt: str = "添加适当的标点符号和断句"
+    prompt: str = DEFAULT_PROMPT
 
     # File handling
     supported_formats: List[str] = field(default_factory=lambda: DEFAULT_SUPPORTED_FORMATS.copy())
@@ -113,7 +123,7 @@ class SkillConfig:
             language=raw.get("model", {}).get("language", "zh"),
             temperature=float(raw.get("model", {}).get("temperature", 0.2)),
             response_format=raw.get("model", {}).get("response_format", "text"),
-            prompt=raw.get("model", {}).get("prompt", "添加适当的标点符号和断句"),
+            prompt=raw.get("model", {}).get("prompt", DEFAULT_PROMPT),
             supported_formats=raw.get("files", {}).get("supported_formats", DEFAULT_SUPPORTED_FORMATS),
             max_file_size_mb=int(raw.get("files", {}).get("max_file_size_mb", 25)),
             output_suffix=raw.get("output", {}).get("suffix", ".md"),
@@ -153,7 +163,7 @@ class SkillConfig:
             language=os.getenv("TRANSCRIBE_SKILL_LANGUAGE", "zh"),
             temperature=float(os.getenv("TRANSCRIBE_SKILL_TEMPERATURE", "0.2")),
             response_format=os.getenv("TRANSCRIBE_SKILL_RESPONSE_FORMAT", "text"),
-            prompt=os.getenv("TRANSCRIBE_SKILL_PROMPT", "添加适当的标点符号和断句"),
+            prompt=os.getenv("TRANSCRIBE_SKILL_PROMPT", DEFAULT_PROMPT),
             supported_formats=supported_formats,
             max_file_size_mb=int(os.getenv("TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB", "25")),
             output_suffix=os.getenv("TRANSCRIBE_SKILL_OUTPUT_SUFFIX", ".md"),

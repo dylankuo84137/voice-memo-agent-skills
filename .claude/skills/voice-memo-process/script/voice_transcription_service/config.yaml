@@ -56,7 +56,18 @@ model:
   # Prompt to guide the transcription model
   # Used to improve punctuation, formatting, and context understanding
   # Keep it concise and relevant to your audio content
-  prompt: "add appropriate punctuation and formatting."
+  #
+  # The script-variant clause is load-bearing: on an A/B over the same 18 MB
+  # memo, google/gemini-2.5-flash returned the whole transcript in Simplified
+  # Chinese without it, and clean Traditional with it. google/gemini-2.5-pro
+  # happened to return Traditional either way, so the clause makes explicit
+  # what was only ever incidental.
+  #
+  # Deliberately NOT instructed: "put each sentence on its own line". pro
+  # already segments one sentence per line unprompted (214 lines, zero
+  # mid-clause breaks); asking for it produced 272 lines with 4 sentences
+  # split at a comma.
+  prompt: "Output in Traditional Chinese (Taiwan, 繁體中文) only — never Simplified Chinese. Add appropriate punctuation. Transcribe verbatim: do not summarise, omit, or rephrase."
 
 # -------------------------------------------------------------------------
 # File Handling Configuration
