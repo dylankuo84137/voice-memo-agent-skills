@@ -18,10 +18,12 @@ except ImportError:  # pragma: no cover - optional dependency
 
 DEFAULT_SUPPORTED_FORMATS = [".m4a", ".mp3", ".wav", ".mp4"]
 
-# Kept in sync with `model.prompt` in config.yaml, which is where it is
-# normally set and where the reasoning for each clause is recorded. This is the
-# fallback for a config.yaml that is missing the key, so it must not contradict
-# it: the previous default asked, in Simplified Chinese, for Simplified output.
+# Fallback for a config.yaml that is missing `model.prompt`. It carries only
+# the script-variant guarantee, deliberately not the proper-noun vocabulary the
+# YAML also holds: that list is edited as names are confirmed, and duplicating
+# it here would only give it a second copy to drift from. What this default
+# must not do is contradict the YAML — the previous one asked, in Simplified
+# Chinese, for Simplified output.
 DEFAULT_PROMPT = (
     "Output in Traditional Chinese (Taiwan, 繁體中文) only — never Simplified "
     "Chinese. Add appropriate punctuation. Transcribe verbatim: do not "

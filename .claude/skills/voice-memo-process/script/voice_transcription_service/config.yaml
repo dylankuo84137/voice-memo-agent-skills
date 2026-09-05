@@ -67,6 +67,16 @@ model:
   # already segments one sentence per line unprompted (214 lines, zero
   # mid-clause breaks); asking for it produced 272 lines with 4 sentences
   # split at a comma.
+  #
+  # A proper-noun vocabulary measurably helps — the model produced 四字培訓 /
+  # 四肢培訓 for 師資培訓, 神智學 for 人智學, and a different spelling of every
+  # personal name on every run, which the refine stage then carried into the
+  # vault as fact. But such a list is real people's names, so it does NOT
+  # belong in this tracked file. Set it in the gitignored repo-root `.env` as
+  # TRANSCRIBE_SKILL_PROMPT, which overrides this value wholesale — the same
+  # split the directory settings already use (blank here, real value in .env).
+  # When you do, keep the Traditional-Chinese clause: .env replaces this
+  # string, it does not append to it.
   prompt: "Output in Traditional Chinese (Taiwan, 繁體中文) only — never Simplified Chinese. Add appropriate punctuation. Transcribe verbatim: do not summarise, omit, or rephrase."
 
 # -------------------------------------------------------------------------
