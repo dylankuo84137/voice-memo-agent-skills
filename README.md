@@ -66,7 +66,7 @@ NOTE_PROPERTY_DIR=~/Documents/voice-memo-agent-skills/note-property
 Because the paths come from `.env`, nothing in `config.yaml` or the skills is
 hardcoded to a machine — running on a new computer only requires editing `.env`.
 
-The transcription pipeline targets OpenRouter (`https://openrouter.ai/api/v1`) with `google/gemini-2.5-flash` by default.
+The transcription pipeline targets OpenRouter (`https://openrouter.ai/api/v1`) with `google/gemini-2.5-pro` by default.
 
 ## Tags
 
