@@ -18,6 +18,16 @@ except ImportError:  # pragma: no cover - optional dependency
 
 DEFAULT_SUPPORTED_FORMATS = [".m4a", ".mp3", ".wav", ".mp4"]
 
+# The two modes do not share a size limit, because they do not share a wire
+# format. audio_api uploads the file as multipart: 25 MB is OpenAI's documented
+# per-file cap. chat_completions base64s the audio into one JSON body, where
+# Gemini's cap is 20 MB for the *whole request* — and the measured base64+JSON
+# expansion is 1.3334x, so 20 MiB / 1.3336 = 14.997 MB of raw audio saturates
+# the body exactly, leaving nothing for the prompt. Hence 14, not 15: the
+# spare ~1.4 MB is the prompt and JSON scaffolding's room.
+DEFAULT_MAX_FILE_SIZE_MB = 25
+DEFAULT_CHAT_MAX_FILE_SIZE_MB = 14
+
 # Fallback for a config.yaml that is missing `model.prompt`. It carries only
 # the script-variant guarantee, deliberately not the proper-noun vocabulary the
 # YAML also holds: that list is edited as names are confirmed, and duplicating
@@ -55,6 +65,24 @@ class RetrySettings:
 
 
 @dataclass
+class DownsizeSettings:
+    """Re-encode an oversize memo instead of refusing it.
+
+    Voice memos arrive as 48 kHz stereo ~98 kbps AAC, about three times what
+    speech transcription needs. Mono / 16 kHz / 32 kbps took a measured
+    32.68 MB memo to 10.94 MB in 10.5 s with no loss of duration. That this
+    bitrate still transcribes well is field evidence, not a guess: the
+    2026-09-12 memo was compressed by hand at exactly these settings and its
+    note came back with every proper noun intact.
+    """
+
+    enabled: bool = True
+    channels: int = 1
+    sample_rate: int = 16000
+    bitrate_kbps: int = 32
+
+
+@dataclass
 class SkillConfig:
     """Runtime configuration for script."""
 
@@ -70,7 +98,8 @@ class SkillConfig:
 
     # File handling
     supported_formats: List[str] = field(default_factory=lambda: DEFAULT_SUPPORTED_FORMATS.copy())
-    max_file_size_mb: int = 25
+    max_file_size_mb: int = DEFAULT_MAX_FILE_SIZE_MB
+    chat_max_file_size_mb: int = DEFAULT_CHAT_MAX_FILE_SIZE_MB
     output_suffix: str = ".md"
     output_encoding: str = "utf-8"
     default_output_dir: Optional[str] = None
@@ -85,6 +114,7 @@ class SkillConfig:
 
     safeguards: SafeguardSettings = field(default_factory=SafeguardSettings)
     retry: RetrySettings = field(default_factory=RetrySettings)
+    downsize: DownsizeSettings = field(default_factory=DownsizeSettings)
 
     @staticmethod
     def _load_env() -> None:
@@ -116,6 +146,7 @@ class SkillConfig:
 
         safeguards_data = raw.get("safeguards", {})
         retry_data = raw.get("retry", {})
+        downsize_data = raw.get("downsize", {})
 
         return cls(
             api_key=None,  # YAML never carries secrets
@@ -127,7 +158,14 @@ class SkillConfig:
             response_format=raw.get("model", {}).get("response_format", "text"),
             prompt=raw.get("model", {}).get("prompt", DEFAULT_PROMPT),
             supported_formats=raw.get("files", {}).get("supported_formats", DEFAULT_SUPPORTED_FORMATS),
-            max_file_size_mb=int(raw.get("files", {}).get("max_file_size_mb", 25)),
+            max_file_size_mb=int(
+                raw.get("files", {}).get("max_file_size_mb", DEFAULT_MAX_FILE_SIZE_MB)
+            ),
+            chat_max_file_size_mb=int(
+                raw.get("files", {}).get(
+                    "chat_max_file_size_mb", DEFAULT_CHAT_MAX_FILE_SIZE_MB
+                )
+            ),
             output_suffix=raw.get("output", {}).get("suffix", ".md"),
             output_encoding=raw.get("output", {}).get("encoding", "utf-8"),
             default_output_dir=raw.get("output", {}).get("directory"),
@@ -143,6 +181,12 @@ class SkillConfig:
             retry=RetrySettings(
                 max_attempts=int(retry_data.get("max_attempts", 3)),
                 backoff_seconds=float(retry_data.get("backoff_seconds", 2.0)),
+            ),
+            downsize=DownsizeSettings(
+                enabled=bool(downsize_data.get("enabled", True)),
+                channels=int(downsize_data.get("channels", 1)),
+                sample_rate=int(downsize_data.get("sample_rate", 16000)),
+                bitrate_kbps=int(downsize_data.get("bitrate_kbps", 32)),
             ),
         )
 
@@ -167,7 +211,17 @@ class SkillConfig:
             response_format=os.getenv("TRANSCRIBE_SKILL_RESPONSE_FORMAT", "text"),
             prompt=os.getenv("TRANSCRIBE_SKILL_PROMPT", DEFAULT_PROMPT),
             supported_formats=supported_formats,
-            max_file_size_mb=int(os.getenv("TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB", "25")),
+            max_file_size_mb=int(
+                os.getenv(
+                    "TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB", str(DEFAULT_MAX_FILE_SIZE_MB)
+                )
+            ),
+            chat_max_file_size_mb=int(
+                os.getenv(
+                    "TRANSCRIBE_SKILL_CHAT_MAX_FILE_SIZE_MB",
+                    str(DEFAULT_CHAT_MAX_FILE_SIZE_MB),
+                )
+            ),
             output_suffix=os.getenv("TRANSCRIBE_SKILL_OUTPUT_SUFFIX", ".md"),
             output_encoding=os.getenv("TRANSCRIBE_SKILL_OUTPUT_ENCODING", "utf-8"),
             voice_memo_directory=os.getenv("VOICE_MEMO_DIR") or os.getenv("TRANSCRIBE_SKILL_VOICE_MEMO_DIR"),
@@ -183,6 +237,10 @@ class SkillConfig:
             retry=RetrySettings(
                 max_attempts=int(os.getenv("TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS", "3")),
                 backoff_seconds=float(os.getenv("TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS", "2.0")),
+            ),
+            downsize=DownsizeSettings(
+                enabled=os.getenv("TRANSCRIBE_SKILL_DOWNSIZE", "true").lower() == "true",
+                bitrate_kbps=int(os.getenv("TRANSCRIBE_SKILL_DOWNSIZE_BITRATE_KBPS", "32")),
             ),
         )
 
@@ -221,6 +279,7 @@ class SkillConfig:
                 "prompt": os.getenv("TRANSCRIBE_SKILL_PROMPT"),
                 "supported_formats": os.getenv("TRANSCRIBE_SKILL_SUPPORTED_FORMATS"),
                 "max_file_size_mb": os.getenv("TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB"),
+                "chat_max_file_size_mb": os.getenv("TRANSCRIBE_SKILL_CHAT_MAX_FILE_SIZE_MB"),
                 "output_suffix": os.getenv("TRANSCRIBE_SKILL_OUTPUT_SUFFIX"),
                 "output_encoding": os.getenv("TRANSCRIBE_SKILL_OUTPUT_ENCODING"),
                 "default_output_dir": os.getenv("RAW_TRANSCRIPT_DIR") or os.getenv("TRANSCRIBE_SKILL_OUTPUT_DIR"),
@@ -233,6 +292,8 @@ class SkillConfig:
                 "safeguards_skip_completed": os.getenv("TRANSCRIBE_SKILL_SKIP_COMPLETED"),
                 "retry_max_attempts": os.getenv("TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS"),
                 "retry_backoff_seconds": os.getenv("TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS"),
+                "downsize_enabled": os.getenv("TRANSCRIBE_SKILL_DOWNSIZE"),
+                "downsize_bitrate_kbps": os.getenv("TRANSCRIBE_SKILL_DOWNSIZE_BITRATE_KBPS"),
             }
 
             if env_values["api_key"]:
@@ -259,6 +320,8 @@ class SkillConfig:
                 ]
             if env_values["max_file_size_mb"]:
                 config.max_file_size_mb = int(env_values["max_file_size_mb"])
+            if env_values["chat_max_file_size_mb"]:
+                config.chat_max_file_size_mb = int(env_values["chat_max_file_size_mb"])
             if env_values["output_suffix"]:
                 config.output_suffix = env_values["output_suffix"]
             if env_values["output_encoding"]:
@@ -294,6 +357,14 @@ class SkillConfig:
 
             config.retry = retry
 
+            downsize = config.downsize
+            if env_values["downsize_enabled"]:
+                downsize.enabled = env_values["downsize_enabled"].lower() == "true"
+            if env_values["downsize_bitrate_kbps"]:
+                downsize.bitrate_kbps = int(env_values["downsize_bitrate_kbps"])
+
+            config.downsize = downsize
+
         return config
 
     def validate(self) -> None:
@@ -312,6 +383,16 @@ class SkillConfig:
             raise ValueError("retry.max_attempts must be at least 1")
         if self.retry.backoff_seconds < 0:
             raise ValueError("retry.backoff_seconds must not be negative")
+        if self.max_file_size_mb < 1:
+            raise ValueError("files.max_file_size_mb must be at least 1")
+        if self.chat_max_file_size_mb < 1:
+            raise ValueError("files.chat_max_file_size_mb must be at least 1")
+        if self.downsize.bitrate_kbps < 1:
+            raise ValueError("downsize.bitrate_kbps must be at least 1")
+        if self.downsize.channels not in (1, 2):
+            raise ValueError("downsize.channels must be 1 (mono) or 2 (stereo)")
+        if self.downsize.sample_rate < 8000:
+            raise ValueError("downsize.sample_rate must be at least 8000")
 
     def resolve_database_path(self, base_dir: Optional[Path] = None) -> Path:
         """Resolve the configured database path relative to a base directory."""
@@ -329,7 +410,23 @@ class SkillConfig:
         return any(filename_lower.endswith(fmt.lower()) for fmt in self.supported_formats)
 
     @property
-    def max_file_size_bytes(self) -> int:
-        """Return the maximum file size in bytes."""
+    def effective_max_file_size_mb(self) -> int:
+        """The size cap that actually applies, given the transcription mode.
 
-        return int(self.max_file_size_mb * 1024 * 1024)
+        The branch deliberately mirrors `transcribe`'s dispatch
+        (`transcription.py:79-81`): only the exact string "chat_completions"
+        takes the base64 path, and everything else — including an unrecognised
+        mode — falls through to the audio API. An unknown mode therefore gets
+        the audio_api cap here too, so the limit never disagrees with the
+        request that is actually sent.
+        """
+
+        if self.transcription_mode == "chat_completions":
+            return self.chat_max_file_size_mb
+        return self.max_file_size_mb
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        """Return the maximum file size in bytes, for the mode in use."""
+
+        return int(self.effective_max_file_size_mb * 1024 * 1024)

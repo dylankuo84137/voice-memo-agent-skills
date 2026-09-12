@@ -513,3 +513,26 @@ the cap raised.
 - [ ] `config.yaml` and `README.md` no longer claim 25 MB applies to chat mode
 - [ ] Follows existing patterns (subprocess convention, migration shape, YAML block style)
 - [ ] Every external-behavior claim is VERIFIED by a probe, or carried as an explicit risk
+
+---
+
+## Implementation notes (added during `/implement`)
+
+**Task 5's `_COLUMNS` instruction was wrong and was not followed.** The plan
+called adding `sent_file_size` to `_COLUMNS` "not optional", reasoning that
+`_rekey_on_file_path` would otherwise drop the column. The opposite is true, and
+a probe settled it before any code was written:
+
+```
+_COLUMNS WITH sent_file_size: FAILED -> OperationalError: no such column: sent_file_size
+_COLUMNS WITHOUT:             OK     -> row=('a.m4a', None)
+```
+
+`_rekey_on_file_path` SELECTs `_COLUMNS` **from the legacy table**, which by
+definition predates the new column — naming it there fails the whole migration.
+The rekey's replacement table is built from `_CREATE_TABLE`, which does carry
+`sent_file_size`, so the column survives regardless and simply arrives NULL —
+exactly its "sent as-is" meaning. This is also why `processing_owner`, added the
+same way earlier, is absent from `_COLUMNS`: the plan mistook an existing correct
+decision for an oversight. `_COLUMNS` now carries a comment saying so, and the
+legacy-rekey path is covered by a probe case.

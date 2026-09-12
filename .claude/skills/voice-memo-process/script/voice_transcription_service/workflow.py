@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import sys
+import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .audio_downsize import downsize
 from .config import SkillConfig
 from .database import Database, ISO_FORMAT
 from .transcription import TranscriptionService
@@ -257,6 +261,71 @@ class TranscriptionWorkflow:
             except FileExistsError:
                 index += 1
 
+    def _prepare_upload(self, path: Path, stack: ExitStack) -> Tuple[Path, Optional[int]]:
+        """Pick the file to upload: the original, or a copy small enough to send.
+
+        Returns (path_to_send, bytes_sent_if_recoded). The second value is None
+        whenever the original goes as-is, which is what the database stores for
+        every file that needed no compression.
+
+        Only reached from `run()`, never from `prepare_targets` — so a
+        `--dry-run`, which returns before `run()` is called, spawns no ffmpeg
+        and creates no temp directory.
+        """
+
+        limit = self.config.max_file_size_bytes
+        try:
+            size = path.stat().st_size
+        except OSError:
+            # Missing or unreadable: let transcribe() raise the specific error
+            # it already has for that, rather than inventing a second one.
+            return path, None
+
+        if size <= limit or not self.config.downsize.enabled:
+            return path, None
+
+        settings = self.config.downsize
+        # One temp dir per file, not per run: the name is unique even under
+        # --workers N, where a name derived from the input would collide
+        # between two same-named memos from different folders.
+        tmp_dir = Path(
+            stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="voice-transcription-downsize-")
+            )
+        )
+        reduced = downsize(
+            path,
+            tmp_dir,
+            channels=settings.channels,
+            sample_rate=settings.sample_rate,
+            bitrate_kbps=settings.bitrate_kbps,
+        )
+        sent = reduced.stat().st_size
+
+        if sent > limit:
+            # One pass only. Looping down the bitrate would burn minutes of CPU
+            # guessing at a limit the operator can simply set.
+            raise ValueError(
+                f"{path.name} is still too large after compressing: "
+                f"{size / (1024 * 1024):.2f} MB -> {sent / (1024 * 1024):.2f} MB, "
+                f"over the {self.config.effective_max_file_size_mb} MB limit for "
+                f"transcription_mode {self.config.transcription_mode!r}. Lower "
+                f"downsize.bitrate_kbps or raise the limit."
+            )
+
+        # flush: under --workers N nothing would reach the operator until the
+        # process exited, and this line explains a minute of apparent silence.
+        print(
+            f"⤓ {path.name}: {size / (1024 * 1024):.2f} MB exceeds the "
+            f"{self.config.effective_max_file_size_mb} MB "
+            f"{self.config.transcription_mode} limit; transcribing a "
+            f"{settings.channels}-channel {settings.bitrate_kbps} kbps copy "
+            f"({sent / (1024 * 1024):.2f} MB)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return reduced, sent
+
     def run(
         self,
         targets: List[Target],
@@ -279,7 +348,14 @@ class TranscriptionWorkflow:
                 return (target.filename, f"failed-to-mark-processing: {exc}")
 
             try:
-                transcript = self.service.transcribe(path)
+                # Inside this try on purpose: a failed transcode is funnelled
+                # into mark_error below like any other per-file failure, with
+                # no error path of its own. The stack closes — deleting the
+                # temp copy — as soon as the upload is done, and on Ctrl-C too.
+                with ExitStack() as stack:
+                    send_path, sent_bytes = self._prepare_upload(path, stack)
+                    transcript = self.service.transcribe(send_path)
+
                 if not transcript.strip():
                     raise ValueError("Transcription returned empty text")
 
@@ -317,7 +393,7 @@ class TranscriptionWorkflow:
                     raise
 
                 try:
-                    self.database.mark_completed(key, output_path)
+                    self.database.mark_completed(key, output_path, sent_file_size=sent_bytes)
                 except Exception as exc:
                     # The transcript is on disk; only the bookkeeping failed
                     # (a locked database under --workers N). Report it as this
