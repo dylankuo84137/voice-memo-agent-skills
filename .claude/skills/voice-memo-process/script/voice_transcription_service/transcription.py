@@ -61,11 +61,18 @@ class TranscriptionService:
                 f"Unsupported file format for {audio_path.name}. Supported: {self.config.supported_formats}"
             )
 
+        # A backstop, not the first line of defence: workflow downsizes an
+        # oversize memo before calling, so in the normal pipeline nothing
+        # reaches this raise. It still guards direct use of the service, and a
+        # downsized copy that is somehow still too large. Stays a bare
+        # ValueError and stays above the retry loop — see
+        # EmptyTranscriptionError — so an oversize file fails once, fast.
         file_size = audio_path.stat().st_size
         if file_size > self.config.max_file_size_bytes:
             raise ValueError(
-                f"File size {file_size / (1024 * 1024):.2f} MB exceeds the configured limit of "
-                f"{self.config.max_file_size_mb} MB"
+                f"File size {file_size / (1024 * 1024):.2f} MB exceeds the "
+                f"{self.config.effective_max_file_size_mb} MB limit for "
+                f"transcription_mode {self.config.transcription_mode!r}"
             )
 
         attempts = max(self.config.retry.max_attempts, 1)

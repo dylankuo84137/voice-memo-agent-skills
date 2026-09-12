@@ -41,10 +41,18 @@ _CREATE_TABLE = """
         last_attempt_at TEXT,
         last_error TEXT,
         synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        processing_owner TEXT
+        processing_owner TEXT,
+        sent_file_size INTEGER
     )
 """
 
+# Only the columns a legacy (UNIQUE-on-filename) table is guaranteed to have.
+# Columns added since — processing_owner, sent_file_size — are deliberately
+# absent: _rekey_on_file_path SELECTs this list *from the legacy table*, so
+# naming a newer column there fails the whole migration with "no such column".
+# The rekey's new table is built from _CREATE_TABLE, so those columns still
+# exist afterwards; they simply arrive NULL, which is what each one means for a
+# row that predates it.
 _COLUMNS = (
     "filename, file_path, file_size, created_at, modified_at, status, "
     "status_updated_at, output_path, output_filename, attempt_count, "
@@ -130,6 +138,7 @@ class Database:
             cursor.execute(_CREATE_TABLE)
             self._rekey_on_file_path(conn)
             self._add_processing_owner(conn)
+            self._add_sent_file_size(conn)
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audio_status ON audio_files(status)
@@ -194,6 +203,24 @@ class Database:
         if "processing_owner" in columns:
             return
         cursor.execute("ALTER TABLE audio_files ADD COLUMN processing_owner TEXT")
+
+    @staticmethod
+    def _add_sent_file_size(conn: sqlite3.Connection) -> None:
+        """Add the sent_file_size column to a database created without it.
+
+        Holds the byte count of what was actually uploaded, which differs from
+        file_size whenever an oversize memo was transcribed from a compressed
+        copy. NULL means "the original went as-is" — true of every row written
+        before this column existed, so no backfill is needed.
+        """
+
+        cursor = conn.cursor()
+        columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(audio_files)").fetchall()
+        }
+        if "sent_file_size" in columns:
+            return
+        cursor.execute("ALTER TABLE audio_files ADD COLUMN sent_file_size INTEGER")
 
     def ingest_file(self, file_path: Path) -> Dict[str, str]:
         """Ensure a file is registered in the database and return its record."""
@@ -472,9 +499,13 @@ class Database:
                     attempt_count = attempt_count + 1,
                     last_attempt_at = ?,
                     processing_owner = ?,
-                    last_error = NULL
+                    last_error = NULL,
+                    sent_file_size = NULL
                 WHERE file_path = ?
                 """,
+                # sent_file_size resets alongside last_error: a re-run that no
+                # longer needs a compressed copy (cap raised, file replaced)
+                # must not keep reporting the previous run's upload size.
                 (now, now, _owner_token(), file_path),
             )
             conn.commit()
@@ -514,8 +545,17 @@ class Database:
                 conn.execute("ROLLBACK")
                 raise
 
-    def mark_completed(self, file_path: str, output_path: Path) -> None:
-        """Mark a file as successfully processed."""
+    def mark_completed(
+        self,
+        file_path: str,
+        output_path: Path,
+        sent_file_size: Optional[int] = None,
+    ) -> None:
+        """Mark a file as successfully processed.
+
+        sent_file_size is the byte count actually uploaded; None (the default)
+        records that the original was sent unmodified.
+        """
 
         with self.connect() as conn:
             cursor = conn.cursor()
@@ -527,13 +567,15 @@ class Database:
                     output_path = ?,
                     output_filename = ?,
                     processing_owner = NULL,
-                    last_error = NULL
+                    last_error = NULL,
+                    sent_file_size = ?
                 WHERE file_path = ?
                 """,
                 (
                     _now(),
                     str(output_path.parent),
                     output_path.name,
+                    sent_file_size,
                     file_path,
                 ),
             )

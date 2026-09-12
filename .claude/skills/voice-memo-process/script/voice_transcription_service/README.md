@@ -29,6 +29,7 @@ A unified voice transcription workflow service based on OpenAI API, providing au
 voice_transcription_service/
 ├── __init__.py          # Module initialization
 ├── __main__.py          # Program entry point
+├── audio_downsize.py    # ffmpeg re-encode of an oversize memo (see Automatic Downsize)
 ├── cli.py               # Command-line interface implementation
 ├── config.py            # Configuration management (YAML + environment variables)
 ├── config.yaml          # Default configuration file
@@ -318,7 +319,8 @@ Configuration loading follows this priority (high to low):
 | `TRANSCRIBE_SKILL_TEMPERATURE` | `model.temperature` | Model temperature parameter |
 | `TRANSCRIBE_SKILL_PROMPT` | `model.prompt` | Transcription prompt |
 | `TRANSCRIBE_SKILL_SUPPORTED_FORMATS` | `files.supported_formats` | Supported formats (comma-separated) |
-| `TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB` | `files.max_file_size_mb` | File size limit |
+| `TRANSCRIBE_SKILL_MAX_FILE_SIZE_MB` | `files.max_file_size_mb` | File size limit, `audio_api` mode only (default 25) |
+| `TRANSCRIBE_SKILL_CHAT_MAX_FILE_SIZE_MB` | `files.chat_max_file_size_mb` | File size limit for `chat_completions` mode (default 14) |
 | `TRANSCRIBE_SKILL_OUTPUT_DIR` | `output.directory` | Default output directory |
 | `TRANSCRIBE_SKILL_OUTPUT_SUFFIX` | `output.suffix` | Output file suffix |
 | `TRANSCRIBE_SKILL_VOICE_MEMO_DIR` | `sources.voice_memo_directory` | Voice memo default directory |
@@ -330,6 +332,8 @@ Configuration loading follows this priority (high to low):
 | `TRANSCRIBE_SKILL_SKIP_COMPLETED` | `safeguards.skip_completed_by_default` | Skip completed files |
 | `TRANSCRIBE_SKILL_RETRY_MAX_ATTEMPTS` | `retry.max_attempts` | Total API attempts per file (incl. the first) |
 | `TRANSCRIBE_SKILL_RETRY_BACKOFF_SECONDS` | `retry.backoff_seconds` | Base retry delay, doubled each attempt |
+| `TRANSCRIBE_SKILL_DOWNSIZE` | `downsize.enabled` | Re-encode an oversize file instead of failing it (default true) |
+| `TRANSCRIBE_SKILL_DOWNSIZE_BITRATE_KBPS` | `downsize.bitrate_kbps` | Bitrate of the compressed copy (default 32) |
 
 ### Safety Safeguards
 
@@ -377,8 +381,72 @@ retrying entirely.
 HTTP 408, 409, 429 and ≥500, plus connection errors and timeouts, with
 `max_retries=2` (3 calls). Those are *not* counted here and are not
 double-retried. Everything else — authentication failure, a 4xx that will never
-succeed, an unsupported format, an oversize file — fails on the first attempt
-with no backoff sleep.
+succeed, an unsupported format — fails on the first attempt with no backoff
+sleep. An oversize file is no longer in that list: see
+[Automatic Downsize](#automatic-downsize).
+
+### File size limits
+
+The two transcription modes do not share a limit, because they do not share a
+wire format:
+
+| Mode | Setting | Default | Why |
+|------|---------|---------|-----|
+| `audio_api` | `files.max_file_size_mb` | 25 MB | OpenAI's documented per-file cap for a multipart upload |
+| `chat_completions` | `files.chat_max_file_size_mb` | 14 MB | The audio is base64'd into one JSON body, and Gemini caps an inline request at 20 MB *total* |
+
+The 14 MB figure is derived, not guessed. Measured base64+JSON expansion on
+this exact request shape is 1.3334×, so 20 MiB ÷ 1.3336 = **14.997 MB** of raw
+audio saturates the body exactly, leaving nothing for the prompt. 14 keeps
+~1.4 MB of headroom.
+
+One caveat, recorded honestly: whether OpenRouter forwards the audio inline (so
+Gemini's cap binds) or stages it through Google's Files API (so it does not) is
+**unverified** — no OpenRouter document addresses it. 14 MB is correct under
+either reading, and is in any case far tighter than the 25 MB this mode used to
+be allowed. Raising it is a one-line config change if a later probe settles the
+question.
+
+### Automatic Downsize
+
+A file over the limit for its mode is not rejected. It is re-encoded to a
+temporary speech-grade copy, and that copy is transcribed instead:
+
+```bash
+ffmpeg -v error -y -i <input> -ac 1 -ar 16000 -c:a aac -b:a 32k <temp>/<input name>
+```
+
+The headroom is real: iOS Voice Memos records 48 kHz stereo at ~98 kbps, about
+three times what a transcription model needs to read speech. A measured 46.7-
+minute memo went from **32.66 MB to 10.94 MB in 10.5 s**, with ffprobe
+reporting the duration unchanged to within 0.04 s. That the result still
+transcribes cleanly is field evidence, not a guess — an earlier memo compressed
+by hand at exactly these settings produced a note with every proper noun intact.
+
+It announces itself on stderr as it happens:
+
+```
+⤓ 3月27日08-29與施志恆和譜生討論智慧化氣候校園計畫.m4a: 32.66 MB exceeds the
+  14 MB chat_completions limit; transcribing a 1-channel 32 kbps copy (10.94 MB)
+```
+
+The copy lives in a `voice-transcription-downsize-*` temp directory for exactly
+the duration of one file's upload and is deleted afterwards, including on
+Ctrl-C. Nothing is written next to the original, and the database records what
+was actually sent in `sent_file_size` (NULL means the original went as-is).
+A `--dry-run` never reaches this code: it spawns no `ffmpeg` and creates no
+temp directory.
+
+**Cost.** One successful API call in place of a failed file, plus ~10 s of local
+CPU per oversize memo. There is no extra billed call — the downsize happens
+before the first attempt, not after a rejection.
+
+**Limits.** One pass, no splitting. At 32 kbps a 14 MB cap is roughly **61
+minutes** of audio; a recording longer than that still fails, with an error
+naming both the original and compressed sizes and pointing at
+`downsize.bitrate_kbps`. Chunking a long recording across several requests is
+deliberately not implemented. Set `downsize.enabled: false` (or
+`TRANSCRIBE_SKILL_DOWNSIZE=false`) to restore the old fail-fast behaviour.
 
 ## Database Management
 
@@ -402,9 +470,16 @@ CREATE TABLE audio_files (
     last_attempt_at TEXT,                   -- Last attempt time
     last_error TEXT,                        -- Last error message
     synced_at TEXT,                         -- Sync time
-    processing_owner TEXT                   -- hostname:pid holding 'processing' (see below)
+    processing_owner TEXT,                  -- hostname:pid holding 'processing' (see below)
+    sent_file_size INTEGER                  -- Bytes actually uploaded; NULL = original sent as-is
 );
 ```
+
+`sent_file_size` differs from `file_size` only when the memo was too large for
+the mode's limit and was transcribed from a compressed copy — see
+[Automatic Downsize](#automatic-downsize). It is cleared whenever a file
+re-enters `processing`, so it always describes the run that produced the
+current transcript.
 
 Databases created before the key moved to `file_path` are migrated automatically
 on the next run; keying on the bare filename made two same-named memos in
@@ -706,14 +781,28 @@ This project is community member use only.
 
 ## Changelog
 
-### v2.2 (Current Version)
+### v2.3 (Current Version)
+- Per-mode file size limits: `files.max_file_size_mb` now applies to `audio_api`
+  only, and `chat_completions` gets `files.chat_max_file_size_mb` (default 14,
+  derived from Gemini's 20 MB inline-request cap) — see
+  [File size limits](#file-size-limits)
+- An oversize file is re-encoded to a temporary mono/16 kHz/32 kbps copy and
+  transcribed, instead of failing — see [Automatic Downsize](#automatic-downsize)
+- New `downsize.*` config block with matching `TRANSCRIBE_SKILL_DOWNSIZE` and
+  `TRANSCRIBE_SKILL_DOWNSIZE_BITRATE_KBPS` environment variables
+- New `sent_file_size` column records the bytes actually uploaded; NULL means
+  the original was sent unmodified
+- The size-limit error now names the mode whose limit applied
+
+### v2.2
 - Bounded retry for 200 responses that carry no transcript (empty content, or a
   body with no `choices`) — see [Retry Behaviour](#retry-behaviour)
 - New `retry.max_attempts` / `retry.backoff_seconds` config, with matching
   `TRANSCRIBE_SKILL_RETRY_*` environment variables
 - Exhausted retries now report `finish_reason`, absent `choices`, the body's
   `error` object and token usage instead of `'NoneType' object is not subscriptable`
-- Non-retryable errors (auth, 4xx, bad format, oversize file) still fail fast
+- Non-retryable errors (auth, 4xx, bad format) still fail fast. Oversize files
+  did too until v2.3, which downsizes them instead
 - Documented `attempt_count` as counting runs, not network attempts
 
 ### v2.1
@@ -731,6 +820,6 @@ This project is community member use only.
 
 ---
 
-**Last Updated**: 2026-09-06
+**Last Updated**: 2026-09-13
 **author**: Tony Huang (https://www.youtube.com/@tonyhhq)
-**date-updated**: 2026-09-06
+**date-updated**: 2026-09-13

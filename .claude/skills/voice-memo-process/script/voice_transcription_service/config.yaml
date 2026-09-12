@@ -92,10 +92,27 @@ files:
     - ".wav"   
     - ".mp4"   
 
-  # Maximum file size allowed for transcription (in megabytes)
-  # OpenAI API limit is 25MB per file
-  # Files exceeding this limit will be rejected before API call
+  # Maximum file size allowed for transcription (in megabytes).
+  # NOTE: applies to transcription_mode "audio_api" only — 25MB is OpenAI's
+  # documented per-file limit for a multipart audio upload. Chat completions
+  # uses chat_max_file_size_mb below instead.
   max_file_size_mb: 25
+
+  # Maximum file size for transcription_mode "chat_completions" (in megabytes).
+  # Much lower than 25 because the wire format is different: the audio is
+  # base64-encoded inside a single JSON request body, and Gemini caps an inline
+  # request at 20MB *total* — prompt and scaffolding included. Measured
+  # base64+JSON expansion on this exact body shape is 1.3334x, so
+  # 20MiB / 1.3336 = 14.997MB of raw audio saturates the body exactly. 14 leaves
+  # ~1.4MB of headroom for the prompt.
+  #
+  # Conservative by choice: whether OpenRouter forwards inline (so Gemini's cap
+  # binds) or stages the audio via Google's Files API (so it does not) is
+  # UNVERIFIED — no OpenRouter doc addresses it. 14 is correct either way, and
+  # raising it later is a one-line change here.
+  #
+  # Files over this limit are not rejected outright — see the downsize block.
+  chat_max_file_size_mb: 14
 
 # -------------------------------------------------------------------------
 # Sources (Input Discovery)
@@ -186,3 +203,36 @@ retry:
 
   # Base delay before a retry, doubling each time (2s, then 4s).
   backoff_seconds: 2.0
+
+# -------------------------------------------------------------------------
+# Automatic Downsize
+# -------------------------------------------------------------------------
+# What happens when a memo is larger than the size limit for the mode in use:
+# instead of failing the file, re-encode a temporary copy at speech bitrate and
+# send that. iOS Voice Memos records 48kHz stereo at ~98kbps, roughly three
+# times what a transcription model needs to read speech, so the margin is there
+# to reclaim. Measured: a 32.68MB / 46.7-minute memo became 10.94MB in 10.5s
+# with the duration unchanged, and the same settings applied by hand to an
+# earlier memo produced a transcript with every proper noun intact.
+#
+# The copy lives in a temp directory for the duration of one file's
+# transcription and is deleted afterwards, including on Ctrl-C. Nothing is
+# written next to the original.
+#
+# NOTE: one pass, no splitting. At 32kbps a 14MB cap is about 61 minutes of
+# audio, so a recording longer than that still fails — with an error naming
+# both sizes. Chunking a long recording into several requests is deliberately
+# not implemented; lower bitrate_kbps or raise the cap instead.
+downsize:
+  # Set false to restore the old behaviour: an oversize file fails immediately.
+  enabled: true
+
+  # Audio channels in the copy. 1 (mono) halves the data for speech at no cost.
+  channels: 1
+
+  # Sample rate in Hz. 16000 is the standard speech-recognition rate.
+  sample_rate: 16000
+
+  # Bitrate of the copy in kbps. The main size lever: halving it roughly halves
+  # the copy, at some cost to fidelity.
+  bitrate_kbps: 32
