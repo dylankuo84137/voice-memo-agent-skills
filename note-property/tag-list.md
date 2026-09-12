@@ -10,7 +10,7 @@ The list follows the follwing style:
 [inbox]: items to triage
 [todo]: actionable tasks
 [question]: questions unsolved
-[relf-reflection]: reflections thoughts on my personal experience
+[self-reflection]: reflections thoughts on my personal experience
 [ai-dev]: topics about ai development skills
 [yt-content]: ideas about youtube content creation
 [teaching]: classroom observations, lesson reflections, and student interactions

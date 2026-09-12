@@ -77,7 +77,7 @@ Tags are defined in `note-property/tag-list.md`:
 | `inbox` | Items to triage |
 | `todo` | Actionable tasks |
 | `question` | Unresolved questions |
-| `relf-reflection` | Personal reflections |
+| `self-reflection` | Personal reflections |
 | `ai-dev` | AI development topics |
 | `yt-content` | YouTube content ideas |
 | `teaching` | Classroom observations and lesson reflections |
