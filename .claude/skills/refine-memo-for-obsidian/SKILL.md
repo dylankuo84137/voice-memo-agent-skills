@@ -1,8 +1,8 @@
 ---
-
-## name: refine-memo-for-obsidian
+name: refine-memo-for-obsidian
 description: Refine voice-memo transcripts into Obsidian-style markdown notes
 allowed-tools: Read, Write, Grep, Glob, Bash
+---
 
 # Memo Transcript Refinement
 
